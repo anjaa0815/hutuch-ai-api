@@ -33,6 +33,19 @@ async function checkLimit(uid, ip) {
   const key = process.env.FIREBASE_API_KEY;
   if (!pid || !key) return { ok: true, remaining: null }; // лимит идэвхгүй
 
+  // Pro хэрэглэгч эсэхийг шалгах (users/{uid}.isPro)
+  let isPro = false;
+  if (uid) {
+    try {
+      const ur = await fetch(`https://firestore.googleapis.com/v1/projects/${pid}/databases/(default)/documents/proStatus/${uid}?key=${key}`);
+      if (ur.ok) {
+        const ud = await ur.json();
+        isPro = ud.fields?.isPro?.booleanValue === true;
+      }
+    } catch { /* уншиж чадсангүй — энгийн хэрэглэгч */ }
+  }
+  if (isPro) return { ok: true, remaining: null, pro: true }; // Pro = хязгааргүй
+
   const limit = uid ? LIMIT_USER : LIMIT_GUEST;
   const idPart = uid ? ("u_" + uid) : ("ip_" + String(ip).replace(/[^a-zA-Z0-9]/g, ""));
   const docId = todayKey() + "_" + idPart;
