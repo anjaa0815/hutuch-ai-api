@@ -50,9 +50,9 @@ async function checkLimit(uid, ip) {
 
   if (count >= limit) return { ok: false, remaining: 0, limit, uid: !!uid };
 
-  // Нэмэгдүүлж бичих (patch)
+  // Нэмэгдүүлж бичих (PATCH — updateMask-тай учир документ байхгүй бол шинээр үүсгэнэ)
   try {
-    await fetch(`${base}?key=${key}&updateMask.fieldPaths=count&updateMask.fieldPaths=updated`, {
+    const wr = await fetch(`${base}?key=${key}&updateMask.fieldPaths=count&updateMask.fieldPaths=updated`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ fields: {
@@ -60,7 +60,11 @@ async function checkLimit(uid, ip) {
         updated: { timestampValue: new Date().toISOString() },
       }}),
     });
-  } catch { /* бичиж чадсангүй — үргэлжлүүлнэ */ }
+    if (!wr.ok) {
+      const errText = await wr.text();
+      console.error("aiUsage write failed:", wr.status, errText);
+    }
+  } catch (e) { console.error("aiUsage write error:", e.message); }
 
   return { ok: true, remaining: limit - (count + 1) };
 }
