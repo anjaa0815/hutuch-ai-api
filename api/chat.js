@@ -123,32 +123,64 @@ export default async function handler(req, res) {
       return;
     }
 
-    const baseUrl = process.env.CHAT_BASE_URL || "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
-    const model = process.env.CHAT_MODEL || "gemini-2.0-flash";
-    const key = process.env.CHAT_API_KEY;
-    if (!key) { res.status(500).json({ error: "CHAT_API_KEY тохируулагдаагүй" }); return; }
+    /* --- Провайдер дуудах (OpenAI-нийцтэй ба Anthropic хоёуланг дэмжинэ) --- */
+    const callProvider = async ({ baseUrl, model, key }, msgs) => {
+      const isAnthropic = baseUrl.includes("api.anthropic.com");
+      const r = isAnthropic
+        ? await fetch(baseUrl, {
+            method: "POST",
+            headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+            body: JSON.stringify({ model, max_tokens: 1400, system: SYSTEM_PROMPT, messages: msgs }),
+          })
+        : await fetch(baseUrl, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${key}`, "content-type": "application/json" },
+            body: JSON.stringify({ model, max_tokens: 1400, messages: [{ role: "system", content: SYSTEM_PROMPT }, ...msgs] }),
+          });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const err = new Error(`provider ${r.status}`);
+        err.status = r.status; err.body = data;
+        throw err;
+      }
+      const out = isAnthropic
+        ? (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n")
+        : (data.choices?.[0]?.message?.content || "");
+      if (!out) throw new Error("empty reply");
+      return out;
+    };
 
-    const isAnthropic = baseUrl.includes("api.anthropic.com");
+    /* --- Үндсэн ба нөөц провайдерууд ---
+       CHAT_*   = үндсэн (жишээ: Gemini free tier)
+       CHAT2_*  = нөөц (жишээ: Groq) — үндсэн нь лимит/алдаа өгвөл автоматаар шилжинэ
+       CHAT_PLAN_MODEL = план үүсгэхэд ашиглах илүү ухаалаг модель (заавал биш) */
+    const isPlan = req.body?.mode === "plan";
+    const primary = {
+      baseUrl: process.env.CHAT_BASE_URL || "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+      model: (isPlan && process.env.CHAT_PLAN_MODEL) || process.env.CHAT_MODEL || "gemini-2.5-flash",
+      key: process.env.CHAT_API_KEY,
+    };
+    const backup = process.env.CHAT2_API_KEY ? {
+      baseUrl: process.env.CHAT2_BASE_URL || "https://api.groq.com/openai/v1/chat/completions",
+      model: process.env.CHAT2_MODEL || "openai/gpt-oss-120b",
+      key: process.env.CHAT2_API_KEY,
+    } : null;
+
+    if (!primary.key) { res.status(500).json({ error: "CHAT_API_KEY тохируулагдаагүй" }); return; }
+
     let reply = "";
-
-    if (isAnthropic) {
-      const r = await fetch(baseUrl, {
-        method: "POST",
-        headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-        body: JSON.stringify({ model, max_tokens: 1024, system: SYSTEM_PROMPT, messages: trimmed }),
-      });
-      const data = await r.json();
-      if (!r.ok) { console.error("Provider error:", data); res.status(502).json({ error: "AI үйлчилгээ түр боломжгүй" }); return; }
-      reply = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
-    } else {
-      const r = await fetch(baseUrl, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${key}`, "content-type": "application/json" },
-        body: JSON.stringify({ model, max_tokens: 1024, messages: [{ role: "system", content: SYSTEM_PROMPT }, ...trimmed] }),
-      });
-      const data = await r.json();
-      if (!r.ok) { console.error("Provider error:", data); res.status(502).json({ error: "AI үйлчилгээ түр боломжгүй" }); return; }
-      reply = data.choices?.[0]?.message?.content || "";
+    try {
+      reply = await callProvider(primary, trimmed);
+    } catch (e1) {
+      console.error("Primary provider failed:", e1.status || "", JSON.stringify(e1.body || e1.message).slice(0, 300));
+      if (!backup) { res.status(502).json({ error: "AI үйлчилгээ түр боломжгүй" }); return; }
+      try {
+        reply = await callProvider(backup, trimmed);
+        console.log("Fallback provider used");
+      } catch (e2) {
+        console.error("Backup provider failed:", e2.status || "", JSON.stringify(e2.body || e2.message).slice(0, 300));
+        res.status(502).json({ error: "AI үйлчилгээ түр боломжгүй" }); return;
+      }
     }
 
     if (!reply) { res.status(502).json({ error: "Хоосон хариу ирлээ" }); return; }
